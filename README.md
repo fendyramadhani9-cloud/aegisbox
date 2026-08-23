@@ -58,28 +58,28 @@ graph TD
 
 ## 3. Process Containment & Lifecycle Synchronization
 
-To eliminate race conditions between process creation and cgroup attachment:
+To eliminate race conditions between process creation and cgroup attachment, AegisBox implements a pipe-synchronized bootstrap lifecycle:
 
-```text
-Parent Process (AegisBox Engine)               Child Process (Sandbox Launcher)
-       │                                                      │
-       ├──── Create sync pipe & Cgroup v2 ───────────────────┤
-       │                                                      │
-       ├──── Spawn child in new namespaces ──────────────────►│ (CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET)
-       │                                                      │
-       │                                                      ├─► Block reading sync pipe (0 user code runs)
-       │                                                      │
-       ├──── Attach child PID into cgroup.procs ──────────────┤
-       │                                                      │
-       ├──── Send release signal over sync pipe ─────────────►│
-       │                                                      │
-       │                                                      ├─► Apply PR_SET_NO_NEW_PRIVS
-       │                                                      ├─► Load Seccomp BPF filter
-       │                                                      ├─► Set up VFS mounts & workspace
-       │                                                      └─► syscall.Exec("python3", args, env)
-       │                                                                      │
-       ▼                                                                      ▼
-  Wait & Collect Telemetry                                           Execute User Script
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Parent as Parent (AegisBox Engine)
+    actor Kernel as Linux Kernel (Cgroups & NS)
+    actor Child as Child Launcher (aegisbox __init__)
+    actor Target as User Process (python3)
+
+    Parent->>Kernel: 1. Setup Cgroups v2 node & Limits (memory.max, cpu.max, pids.max)
+    Parent->>Child: 2. Spawn Child with Cloneflags (NEWPID, NEWNS, NEWNET) & pass sync pipe fd 3
+    Note over Child: 3. Child BLOCKS on sync pipe read<br/>(Zero untrusted code executed)
+    Parent->>Kernel: 4. Attach Child PID to cgroup.procs
+    Parent->>Child: 5. Write 1 byte to sync pipe (Release lock)
+    Note over Child: 6. Apply PR_SET_NO_NEW_PRIVS & Drop Credential (UID 1000)
+    Note over Child: 7. Apply Seccomp BPF Syscall Filter
+    Note over Child: 8. Setup Private VFS & mount isolation
+    Child->>Target: 9. syscall.Execve("python3", args, env)
+    Target->>Target: 10. Execute Untrusted Python Script
+    Target-->>Parent: 11. Process Exits / SIGKILL on Timeout
+    Parent->>Kernel: 12. Collect Cgroup Metrics & Trigger Cleanup (cgroup.kill & unmounts)
 ```
 
 ---
@@ -90,36 +90,34 @@ AegisBox explicitly adheres to **Continuous Delivery** rather than Continuous De
 
 ### Delivery Flow
 
-```text
-Windows Workstation
-   ↓ (git push)
-GitHub Repository
-   ↓
-GitHub Actions CI
-   ├── gofmt formatting verification
-   ├── go vet static analysis
-   ├── go test -race unit & integration tests
-   └── binary compilation & smoke checks
-          ↓
-       CI PASS
-          ↓
-GitHub Environment: "production"
-          ↓
-   [ MANUAL APPROVAL GATE ] (Repository Owner)
-          ↓
-Release Artifact Ready (aegisbox-linux-amd64.tar.gz)
-          ↓
-Windows Operator (PowerShell / SSH)
-          ↓
-Ubuntu 24.04 VMware VM (192.168.1.9)
-          ↓
-Atomic Release Symlink (/opt/aegisbox/releases/current)
-          ↓
-systemd (aegisbox.service)
-          ↓
-HTTP Health Check Verification (GET /health -> 200 OK)
-          ├── PASS: Active Release Retained
-          └── FAIL: Automatic Instant Rollback to Previous Release
+```mermaid
+flowchart TD
+    Dev["💻 Windows Workstation<br/><i>VS Code / Git</i>"] -->|git push| GH["🐙 GitHub Repository<br/><i>main branch</i>"]
+    
+    subgraph CI["GitHub Actions CI Workflow"]
+        GH --> G1["1. gofmt format check"]
+        G1 --> G2["2. go vet static analysis"]
+        G2 --> G3["3. go test -race tests"]
+        G3 --> G4["4. go build & smoke test"]
+    end
+
+    CI -->|CI Passed| PKG["📦 Build Release Package<br/><i>aegisbox-linux-amd64.tar.gz</i>"]
+    
+    subgraph CD["Continuous Delivery Governance"]
+        PKG --> ENV["🛡️ GitHub Environment: production"]
+        ENV --> GATE{"✋ Manual Approval Gate<br/><i>Required Maintainer Review</i>"}
+        GATE -->|Approved| RDY["🚀 Release Ready for Deployment"]
+    end
+    
+    RDY -->|Trigger deploy-remote.ps1| OP["👨‍💻 Operator Deployment<br/><i>SCP Tarball + SSH Execution</i>"]
+    
+    subgraph VM["Ubuntu 24.04 VMware VM (192.168.1.9)"]
+        OP --> ATOMIC["🔄 Atomic Release Symlink<br/><i>/opt/aegisbox/releases/current</i>"]
+        ATOMIC --> SVC["⚙️ systemd Service Restart<br/><i>systemctl restart aegisbox.service</i>"]
+        SVC --> HC{"🩺 Health Check Polling<br/><i>GET /health -> HTTP 200</i>"}
+        HC -->|HTTP 200 OK| SUCCESS["✅ Live Release Verified & Retained"]
+        HC -->|Failure / Timeout| ROLLBACK["⏪ Automatic Instant Rollback<br/><i>Revert symlink to 'previous'</i>"]
+    end
 ```
 
 ---
