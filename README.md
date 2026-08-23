@@ -37,19 +37,20 @@ AegisBox is an educational and platform engineering research sandbox built from 
 graph TD
     Client["Client (CLI / Web / API)"] -->|POST /execute| Router["API Router (internal/api)"]
     Router -->|ExecutionRequest| ExecMgr["Execution Manager (internal/executor)"]
-    ExecMgr -->|Acquires Sandbox| SbxAdapter["Sandbox Adapter (internal/sandbox)"]
+    ExecMgr -->|Orchestrates Execution| SbxAdapter["Sandbox Adapter (internal/sandbox)"]
     
-    subgraph Linux Kernel Containment
-        SbxAdapter -->|Configures Limits| CG["Cgroups v2 (/sys/fs/cgroup/aegisbox/<id>)"]
-        SbxAdapter -->|Spawns Isolated Child| NS["Linux Namespaces (PID, Mount, Net, UTS, IPC)"]
-        NS -->|Restricts Syscalls| SC["Seccomp BPF Filter Policy"]
-        NS -->|Drops Privileges| CAP["Capability Dropping (PR_SET_NO_NEW_PRIVS)"]
-        NS -->|Prepares Read-Only Root| VFS["VFS Mounts (pivot_root/chroot, tmpfs /tmp, /workspace)"]
+    subgraph LKC["Linux Kernel Containment (5 Core Defense Pillars)"]
+        direction TB
+        SbxAdapter -->|1. Enforces Limits| CG["Cgroups v2 (/sys/fs/cgroup/aegisbox/<id>)<br/><i>memory.max, cpu.max, pids.max</i>"]
+        SbxAdapter -->|2. Virtualizes View| NS["Linux Namespaces<br/><i>CLONE_NEWPID, NET, NS, UTS, IPC</i>"]
+        SbxAdapter -->|3. Filesystem Jailing| VFS["VFS Mount Isolation<br/><i>Read-Only Root, pivot_root, tmpfs</i>"]
+        SbxAdapter -->|4. Syscall Defense| SC["Seccomp BPF Filter<br/><i>Blocks dangerous syscalls (Ring 0)</i>"]
+        SbxAdapter -->|5. Drops Privileges| CAP["Capability Dropping<br/><i>PR_SET_NO_NEW_PRIVS, Drop UID 1000</i>"]
     end
     
-    VFS -->|Executes Code| Runtime["Runtime Adapter (internal/runtime - Python 3)"]
+    LKC -->|Spawns Sandboxed Process| Runtime["Runtime Adapter (internal/runtime - Python 3)"]
     Runtime -->|Captures I/O & Telemetry| Collector["Result Classifier & Telemetry"]
-    Collector -->|Cleaned Result| ExecMgr
+    Collector -->|Cleaned Verdict Result| ExecMgr
     ExecMgr -->|Structured JSON Response| Client
 ```
 
