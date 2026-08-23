@@ -3,9 +3,14 @@
 [![AegisBox CI](https://github.com/fendyramadhani9-cloud/aegisbox/actions/workflows/ci.yml/badge.svg)](https://github.com/fendyramadhani9-cloud/aegisbox/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue.svg)](https://golang.org)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20Kernel%206.x-green.svg)](https://kernel.org)
+[![Medium Article](https://img.shields.io/badge/Medium-Read%20the%20Deep%20Dive-black?logo=medium&logoColor=white)](https://medium.com/@FendyRamadhani/membangun-container-engine-dari-nol-container-bukan-komputer-mini-melainkan-manipulasi-proses-719004d0eea7?sharedUserId=FendyRamadhani)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
 AegisBox is an educational and platform engineering research sandbox built from scratch in Go. It explores native Linux kernel containment primitives (Namespaces, Cgroups v2, Seccomp BPF, VFS Isolation) without relying on Docker or container runtimes.
+
+> 📖 **Featured Engineering Publication**:
+> Read the complete architectural breakdown and design philosophy behind this project on Medium:
+> 👉 **[Membangun Container Engine dari Nol: Container Bukan "Komputer Mini", Melainkan Manipulasi Proses](https://medium.com/@FendyRamadhani/membangun-container-engine-dari-nol-container-bukan-komputer-mini-melainkan-manipulasi-proses-719004d0eea7?sharedUserId=FendyRamadhani)**
 
 > [!NOTE]
 > **Educational & Research Notice**: AegisBox is an educational systems project designed to explore Linux kernel isolation and platform engineering patterns. It is **not** a production-grade multi-tenant sandbox and has not undergone formal security audits.
