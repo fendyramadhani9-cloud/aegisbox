@@ -106,8 +106,10 @@ func (m *ExecutionManager) Execute(ctx context.Context, req *ExecutionRequest) *
 	}
 
 	// 3. Create ephemeral workspace directory
+	_ = os.MkdirAll(m.cfg.Sandbox.WorkspaceBaseDir, 0777)
+	_ = os.Chmod(m.cfg.Sandbox.WorkspaceBaseDir, 0777)
 	workspaceDir := filepath.Join(m.cfg.Sandbox.WorkspaceBaseDir, execID)
-	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+	if err := os.MkdirAll(workspaceDir, 0777); err != nil {
 		res := &ExecutionResult{
 			ExecutionID:  execID,
 			Status:       StatusStartError,
