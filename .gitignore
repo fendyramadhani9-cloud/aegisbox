@@ -1,21 +1,29 @@
-# Go
+# Binaries
 bin/
 *.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts and coverage
 *.test
 *.out
+coverage.html
 
-# Environment
-.env
-.env.*
-
-# Logs
-*.log
-logs/
-
-# Runtime data
-jobs/
+# Workspaces & runtime templates
 tmp/
+workspaces/
+rootfs/*/dev/
+rootfs/*/proc/
+rootfs/*/sys/
 
-# OS
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS specific
 .DS_Store
 Thumbs.db

@@ -1,0 +1,15 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "development"
+
+sandbox:
+  rootfs_dir: "/opt/aegisbox/rootfs"
+  workspace_base_dir: "/tmp/aegisbox/workspaces"
+  default_timeout_ms: 1000
+  max_timeout_ms: 30000
+  default_memory_mb: 64
+  max_memory_mb: 512
+  default_processes: 10
+  max_processes: 64
+  cgroup_parent: "/sys/fs/cgroup/aegisbox"

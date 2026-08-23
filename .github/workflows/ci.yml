@@ -1,0 +1,45 @@
+name: AegisBox CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build, Vet & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Check Formatting (gofmt)
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following files are not formatted properly:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run Go Vet
+        run: go vet ./...
+
+      - name: Run Unit Tests
+        run: go test -v -race ./...
+
+      - name: Build Binary
+        run: go build -v -o bin/aegisbox ./cmd/aegisbox
+
+      - name: Test Binary Execution
+        run: |
+          ./bin/aegisbox -version
+          ./bin/aegisbox -health

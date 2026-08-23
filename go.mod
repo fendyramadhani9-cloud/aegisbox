@@ -1,3 +1,3 @@
-module github.com/fendyramadhani9-cloud/aegisbox
+module github.com/aegisbox/aegisbox
 
-go 1.22.2
+go 1.22
