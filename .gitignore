@@ -1,5 +1,8 @@
-# Binaries
+# Binaries & Distribution
 bin/
+dist/
+RELEASE_METADATA
+*.tar.gz
 *.exe
 *.exe~
 *.dll

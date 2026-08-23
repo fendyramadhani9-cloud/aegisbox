@@ -1,16 +1,17 @@
-name: AegisBox CD Deployment
+name: AegisBox Continuous Delivery
 
 on:
   push:
     branches: [ main ]
-    tags:
-      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  deploy:
-    name: Deploy to Ubuntu Linux Server
+  build-release-artifact:
+    name: Build & Package Release Artifact
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout Code
@@ -22,50 +23,70 @@ jobs:
           go-version: '1.22'
           cache: true
 
-      - name: Build Linux Binary
+      - name: Compile Linux Binary (amd64)
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -v -o bin/aegisbox ./cmd/aegisbox
+          mkdir -p bin dist
+          VERSION="0.1.0"
+          COMMIT_SHA="${GITHUB_SHA::7}"
+          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          
+          echo "VERSION=${VERSION}" > RELEASE_METADATA
+          echo "COMMIT_SHA=${COMMIT_SHA}" >> RELEASE_METADATA
+          echo "BUILD_TIME=${BUILD_TIME}" >> RELEASE_METADATA
+          
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-s -w -X main.Version=${VERSION} -X main.GitCommit=${COMMIT_SHA} -X main.BuildTime=${BUILD_TIME}" \
+            -v -o bin/aegisbox ./cmd/aegisbox
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        if: env.DEPLOY_HOST != ''
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
-          script: |
-            mkdir -p /opt/aegisbox/bin /opt/aegisbox/config /opt/aegisbox/rootfs
-            systemctl stop aegisbox.service || true
+      - name: Package Release Tarball
+        run: |
+          tar -czvf dist/aegisbox-linux-amd64.tar.gz \
+            bin/aegisbox \
+            configs/config.yaml \
+            deploy/aegisbox.service \
+            scripts/install.sh \
+            scripts/deploy.sh \
+            scripts/setup-rootfs.sh \
+            RELEASE_METADATA
 
-      - name: Transfer Binary & Assets
-        uses: appleboy/scp-action@v0.1.7
-        if: env.DEPLOY_HOST != ''
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      - name: Upload Release Artifact
+        uses: actions/upload-artifact@v4
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
-          source: "bin/aegisbox,configs/config.yaml,scripts/*,deploy/*"
-          target: "/opt/aegisbox"
+          name: aegisbox-linux-amd64
+          path: dist/aegisbox-linux-amd64.tar.gz
+          retention-days: 14
 
-      - name: Restart Service & Verify Health
-        uses: appleboy/ssh-action@v1.0.3
-        if: env.DEPLOY_HOST != ''
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+  production-approval-gate:
+    name: Production Approval & Delivery Notice
+    needs: build-release-artifact
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Download Packaged Artifact
+        uses: actions/download-artifact@v4
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
-          script: |
-            chmod +x /opt/aegisbox/bin/aegisbox /opt/aegisbox/scripts/*.sh
-            cp /opt/aegisbox/deploy/aegisbox.service /etc/systemd/system/aegisbox.service
-            systemctl daemon-reload
-            systemctl restart aegisbox.service
-            /opt/aegisbox/scripts/deploy.sh 127.0.0.1 8080
+          name: aegisbox-linux-amd64
+          path: dist/
+
+      - name: Publish Delivery Instructions
+        run: |
+          echo "### 🚀 AegisBox Release Approved for Delivery" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metadata | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Target Environment** | Ubuntu 24.04 VMware VM (Private LAN) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Host IP** | \`192.168.1.9\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | Approved & Ready for Operator Deployment |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 📦 Windows Operator Deployment Command:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`powershell" >> $GITHUB_STEP_SUMMARY
+          echo "# From Windows workstation PowerShell:" >> $GITHUB_STEP_SUMMARY
+          echo ".\\scripts\\deploy-remote.ps1 -TargetHost \"192.168.1.9\" -TargetUser \"ubuntu\"" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### 🔧 Manual SSH Deployment Alternative:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "scp dist/aegisbox-linux-amd64.tar.gz ubuntu@192.168.1.9:/tmp/" >> $GITHUB_STEP_SUMMARY
+          echo "ssh ubuntu@192.168.1.9 \"sudo /opt/aegisbox/scripts/deploy.sh /tmp/aegisbox-linux-amd64.tar.gz 8080\"" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

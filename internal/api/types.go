@@ -34,10 +34,12 @@ type ErrorResponse struct {
 	Details string `json:"details,omitempty"`
 }
 
-// HealthResponse represents system health status.
+// HealthResponse represents system health status and build metadata.
 type HealthResponse struct {
 	Status             string   `json:"status"`
 	Version            string   `json:"version"`
+	GitCommit          string   `json:"git_commit,omitempty"`
+	BuildTime          string   `json:"build_time,omitempty"`
 	OS                 string   `json:"os"`
 	Arch               string   `json:"arch"`
 	SupportedLanguages []string `json:"supported_languages"`

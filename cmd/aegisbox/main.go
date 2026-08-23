@@ -20,10 +20,16 @@ import (
 	"github.com/aegisbox/aegisbox/internal/sandbox"
 )
 
-const (
+var (
 	Version   = "0.1.0"
+	GitCommit = "dev"
+	BuildTime = "unknown"
 	Milestone = "AegisBox Production Isolation Engine"
 )
+
+func init() {
+	api.SetVersionMetadata(Version, GitCommit, BuildTime)
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -62,7 +68,7 @@ func printUsage() {
 	fmt.Println("  aegisbox server   [options]   Start the REST API daemon")
 	fmt.Println("  aegisbox execute  [options]   Execute code directly via CLI")
 	fmt.Println("  aegisbox health               Perform local diagnostics")
-	fmt.Println("  aegisbox version              Show version information")
+	fmt.Println("  aegisbox version              Show version and build information")
 	fmt.Println("\nServer Options:")
 	fmt.Println("  -port int     Port to listen on (default 8080)")
 	fmt.Println("  -host string  Host to bind to (default 0.0.0.0)")
@@ -76,6 +82,7 @@ func printUsage() {
 
 func runVersion() {
 	fmt.Printf("AegisBox Engine v%s (%s)\n", Version, Milestone)
+	fmt.Printf("Commit: %s | Built: %s\n", GitCommit, BuildTime)
 	fmt.Printf("Platform: %s/%s | Go: %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version())
 }
 
@@ -83,6 +90,8 @@ func runHealth() {
 	health := api.HealthResponse{
 		Status:             "ok",
 		Version:            Version,
+		GitCommit:          GitCommit,
+		BuildTime:          BuildTime,
 		OS:                 runtime.GOOS,
 		Arch:               runtime.GOARCH,
 		SupportedLanguages: aegisruntime.DefaultRegistry().SupportedLanguages(),
@@ -119,9 +128,11 @@ func runServer(args []string) {
 	}
 
 	logger.Info("starting aegisbox server", map[string]interface{}{
-		"addr":    addr,
-		"version": Version,
-		"os":      runtime.GOOS,
+		"addr":       addr,
+		"version":    Version,
+		"git_commit": GitCommit,
+		"build_time": BuildTime,
+		"os":         runtime.GOOS,
 	})
 
 	// Graceful shutdown channel
@@ -135,7 +146,7 @@ func runServer(args []string) {
 		}
 	}()
 
-	fmt.Printf("AegisBox API Server listening at http://%s\n", addr)
+	fmt.Printf("AegisBox API Server listening at http://%s (commit: %s)\n", addr, GitCommit)
 	<-stopChan
 
 	logger.Info("shutting down server gracefully...", nil)

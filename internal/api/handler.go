@@ -11,9 +11,24 @@ import (
 	"github.com/aegisbox/aegisbox/internal/logging"
 )
 
-const (
+var (
 	APIVersion = "0.1.0"
+	GitCommit  = "dev"
+	BuildTime  = "unknown"
 )
+
+// SetVersionMetadata updates the build metadata exposed via /health.
+func SetVersionMetadata(version, commit, buildTime string) {
+	if version != "" {
+		APIVersion = version
+	}
+	if commit != "" {
+		GitCommit = commit
+	}
+	if buildTime != "" {
+		BuildTime = buildTime
+	}
+}
 
 // Handler handles HTTP requests for AegisBox API.
 type Handler struct {
@@ -49,6 +64,8 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	res := HealthResponse{
 		Status:             "ok",
 		Version:            APIVersion,
+		GitCommit:          GitCommit,
+		BuildTime:          BuildTime,
 		OS:                 runtime.GOOS,
 		Arch:               runtime.GOARCH,
 		SupportedLanguages: langs,

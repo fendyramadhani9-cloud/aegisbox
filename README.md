@@ -33,107 +33,168 @@ graph TD
 
 ---
 
-## 2. Core Linux Isolation Mechanisms
+## 2. Continuous Delivery Pipeline Architecture
 
-AegisBox avoids third-party container engines (Docker, containerd) and implements Linux kernel containment primitives directly:
+AegisBox explicitly adheres to **Continuous Delivery** rather than Continuous Deployment. Every release artifact is verified automatically, but physical rollout to the private runtime VM requires **manual human approval** by the environment owner.
 
-| Layer | Kernel Mechanism | AegisBox Implementation | Defense Purpose |
-| :--- | :--- | :--- | :--- |
-| **Process Tree** | `CLONE_NEWPID` | `namespace_linux.go` | Sandboxed process perceives itself as PID 1; cannot inspect or signal host processes. |
-| **Filesystem Mounts** | `CLONE_NEWNS` + `pivot_root` | `mount_linux.go` | Read-only base rootfs template, ephemeral `tmpfs` `/workspace` and `/tmp`, isolated `/proc`. Host `/` is completely hidden. |
-| **Networking** | `CLONE_NEWNET` | `namespace_linux.go` | New empty network namespace with zero external routes; disables internet access and LAN egress. |
-| **Resource Limits** | Cgroups v2 | `cgroup_linux.go` | Enforces `memory.max`, `memory.swap.max`, `cpu.max`, and `pids.max` (anti-fork-bomb). |
-| **Syscall Defense** | Seccomp BPF | `seccomp_linux.go` | Blocks dangerous kernel calls (`mount`, `reboot`, `ptrace`, `kexec_load`, `init_module`, raw sockets). |
-| **Privilege Reduction** | `PR_SET_NO_NEW_PRIVS` | `capabilities_linux.go` | Clears ambient capabilities and prevents gaining root via `setuid` binaries. |
-| **Deterministic Cleanup** | `CleanupTracker` | `cleanup.go` | Guaranteed teardown of mounts, cgroup destruction (`cgroup.kill`), and ephemeral workspace removal. |
-
----
-
-## 3. Development & Runtime Workflow
-
-AegisBox uses a **dual-environment development lifecycle**:
+### Delivery Flow
 
 ```text
-[ Windows 11 Workstation ]
-  ├── VS Code / PowerShell
-  ├── Cross-platform Go compilation
-  └── Generic unit tests & API mocks
-            │
-            ▼ (git push)
-[ GitHub Actions CI / CD ]
-  ├── gofmt formatting verification
-  ├── go vet static analysis
-  ├── go test -race unit tests
-  └── automated binary compilation
-            │
-            ▼ (deploy)
-[ Ubuntu Linux Host ]
-  ├── Linux Kernel 6.x (Cgroups v2, Namespaces, Seccomp)
-  ├── Minimal RootFS Template (/opt/aegisbox/rootfs/python)
-  └── AegisBox Systemd Daemon (aegisbox.service)
+Windows Workstation
+   ↓ (git push)
+GitHub Repository
+   ↓
+GitHub Actions CI
+   ├── gofmt formatting verification
+   ├── go vet static analysis
+   ├── go test -race unit & integration tests
+   └── binary compilation & smoke checks
+          ↓
+       CI PASS
+          ↓
+GitHub Environment: "production"
+          ↓
+   [ MANUAL APPROVAL GATE ] (Repository Owner)
+          ↓
+Release Artifact Ready (aegisbox-linux-amd64.tar.gz)
+          ↓
+Windows Operator (PowerShell / SSH)
+          ↓
+Ubuntu 24.04 VMware VM (192.168.1.9)
+          ↓
+Atomic Release Symlink (/opt/aegisbox/releases/current)
+          ↓
+systemd (aegisbox.service)
+          ↓
+HTTP Health Check Verification (GET /health -> 200 OK)
+          ├── PASS: Active Release Retained
+          └── FAIL: Automatic Instant Rollback to Previous Release
+```
+
+### Why Continuous Delivery?
+- **Network Topology**: The Ubuntu VMware runtime resides on a private local area network (`192.168.1.9`) and is deliberately **not exposed to the public internet**. GitHub-hosted runners cannot and should not SSH into private LAN infrastructure.
+- **Operator Governance**: High-impact infrastructure changes require intentional, verified operator execution.
+
+---
+
+## 3. GitHub Environment & Approval Gate Setup
+
+To enforce the manual approval gate on GitHub:
+
+1. Open your repository on GitHub: **Settings $\rightarrow$ Environments**.
+2. Click **New environment** and name it `production`.
+3. Under **Deployment protection rules**, check **Required reviewers**.
+4. Add yourself (`fendyramadhani9-cloud`) as the designated reviewer.
+5. Save the protection rules.
+
+When code is pushed to `main`, the `build-release-artifact` job will package the release and pause at `production-approval-gate` until you review and click **Approve and deploy** in the GitHub Actions UI.
+
+---
+
+## 4. Release Artifact Specification
+
+The CD workflow produces a standalone, reproducible release package named `aegisbox-linux-amd64.tar.gz` containing:
+
+```text
+aegisbox-linux-amd64.tar.gz
+├── bin/
+│   └── aegisbox                # Statically linked Linux amd64 binary (with injected GitCommit & BuildTime)
+├── configs/
+│   └── config.yaml             # Runtime and limit defaults
+├── deploy/
+│   └── aegisbox.service        # Hardened systemd service definition
+├── scripts/
+│   ├── install.sh              # Idempotent host installation script
+│   ├── deploy.sh               # Atomic release deployment & rollback script
+│   └── setup-rootfs.sh         # Python rootfs generator
+└── RELEASE_METADATA            # Metadata file (VERSION, COMMIT_SHA, BUILD_TIME)
 ```
 
 ---
 
-## 4. REST API Specification
+## 5. Deployment to Ubuntu VMware VM (`192.168.1.9`)
 
-### `POST /execute`
+### Option A: One-Command Deployment from Windows (Recommended)
 
-Executes source code inside an isolated ephemeral sandbox.
+From your Windows workstation in VS Code / PowerShell:
 
-#### Request Body
-```json
-{
-  "language": "python",
-  "code": "import sys\nprint('Hello from AegisBox!')",
-  "timeout_ms": 1000,
-  "max_mem_mb": 64,
-  "max_processes": 10
-}
+```powershell
+# Deploy the latest release artifact over SSH:
+.\scripts\deploy-remote.ps1 -TargetHost "192.168.1.9" -TargetUser "ubuntu"
 ```
 
-#### Response Body
-```json
-{
-  "execution_id": "exec-4a9b2c8f1e",
-  "status": "COMPLETED",
-  "stdout": "Hello from AegisBox!\n",
-  "stderr": "",
-  "exit_code": 0,
-  "execution_time_ms": 19,
-  "memory_usage_bytes": 14680064,
-  "cpu_time_ms": 12
-}
+This PowerShell script:
+1. Uploads `dist/aegisbox-linux-amd64.tar.gz` to `ubuntu@192.168.1.9:/tmp/`.
+2. Triggers `sudo /opt/aegisbox/scripts/deploy.sh` remotely over SSH.
+3. Automatically queries `http://192.168.1.9:8080/health` from Windows to verify deployment health.
+
+### Option B: Manual SSH Deployment
+
+```bash
+# 1. Transfer release archive to VM
+scp dist/aegisbox-linux-amd64.tar.gz ubuntu@192.168.1.9:/tmp/
+
+# 2. Connect via SSH and trigger deployment
+ssh ubuntu@192.168.1.9 "sudo /opt/aegisbox/scripts/deploy.sh /tmp/aegisbox-linux-amd64.tar.gz 8080"
 ```
 
-### Supported Execution Statuses
+---
 
-- `COMPLETED`: Script completed normally (exit code 0).
-- `RUNTIME_ERROR`: Script encountered an uncaught exception or non-zero exit code.
-- `TIME_LIMIT_EXCEEDED`: Execution exceeded configured wall-clock timeout.
-- `OOM_KILLED`: Process exceeded allocated memory limit (`memory.max`).
-- `PROCESS_LIMIT_EXCEEDED`: Process/thread creation exceeded `pids.max` (fork-bomb prevented).
-- `START_ERROR`: Initialization or runtime preparation failure.
-- `SANDBOX_ERROR`: Internal containment error.
-- `UNSUPPORTED_LANGUAGE`: Requested runtime is not registered.
+## 6. Linux Runtime Directory Layout & Zero-Downtime Releases
 
-### `GET /health`
+On the Ubuntu host, releases are organized to guarantee zero-downtime swaps and instant rollback:
 
-Returns diagnostic and operational health metadata:
+```text
+/opt/aegisbox/
+├── bin/
+│   └── aegisbox -> /opt/aegisbox/releases/current/bin/aegisbox
+├── config/
+│   └── config.yaml -> /opt/aegisbox/releases/current/configs/config.yaml
+├── releases/
+│   ├── 6adc3d0/                # Release directory for commit 6adc3d0
+│   ├── 2faaa1d/                # Release directory for commit 2faaa1d
+│   ├── previous -> 6adc3d0/    # Pointer to previous known-good release
+│   └── current -> 2faaa1d/     # Active release symlink
+├── rootfs/
+│   └── python/                 # Reusable minimal Python 3 rootfs template
+└── workspaces/                 # Ephemeral per-execution directories
+```
 
+---
+
+## 7. Health Check & Automated Rollback
+
+### Health Verification
+A deployment is **only considered successful** if `GET /health` returns HTTP 200 with `"status": "ok"` and valid metadata:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+Output:
 ```json
 {
   "status": "ok",
   "version": "0.1.0",
+  "git_commit": "2faaa1d",
+  "build_time": "2026-08-23T02:37:49Z",
   "os": "linux",
   "arch": "amd64",
   "supported_languages": ["python"]
 }
 ```
 
+### Automated Rollback Procedure
+If the candidate binary crashes, fails to start, or does not respond with HTTP 200 within 15 seconds:
+1. `scripts/deploy.sh` intercepts the health failure.
+2. Captures diagnostic output via `journalctl -u aegisbox.service -n 25 --no-pager`.
+3. Automatically reverts the `current` symlink back to `/opt/aegisbox/releases/previous`.
+4. Restarts `aegisbox.service` on the previous known-good binary.
+5. Verifies service health on the restored version and reports deployment failure.
+
 ---
 
-## 5. CLI Usage
+## 8. CLI Usage
 
 The AegisBox CLI allows running executions directly or managing the daemon:
 
@@ -151,65 +212,41 @@ aegisbox execute \
 # Health check
 aegisbox health
 
-# Version information
+# Version and build information
 aegisbox version
 ```
 
 ---
 
-## 6. Linux Installation & Systemd Deployment
-
-### Step 1: Clone and Build
-```bash
-git clone https://github.com/fendyramadhani9-cloud/aegisbox.git
-cd aegisbox
-make build
-```
-
-### Step 2: System Installation
-```bash
-sudo ./scripts/install.sh
-```
-
-This script:
-1. Installs the binary to `/usr/local/bin/aegisbox`.
-2. Creates directory hierarchy at `/opt/aegisbox`.
-3. Prepares the minimal Python rootfs at `/opt/aegisbox/rootfs/python`.
-4. Installs the systemd unit file at `/etc/systemd/system/aegisbox.service`.
-
-### Step 3: Manage Systemd Service
-```bash
-sudo systemctl enable --now aegisbox.service
-sudo systemctl status aegisbox.service
-```
-
----
-
-## 7. Testing & Verification
-
-Run the full automated test suite:
+## 9. Local Development & Packaging
 
 ```bash
-# Run all unit and integration tests with race detector
-go test -v -race ./...
+# Run unit tests with race detector
+make test
 
 # Run static analysis
-go vet ./...
+make vet
 
-# Verify code formatting
-gofmt -l .
+# Check code formatting
+make fmt-check
+
+# Compile local binary
+make build
+
+# Package release tarball for Linux amd64
+make package
 ```
 
 ---
 
-## 8. Security Model & Honest Limitations
+## 10. Security Model & Honest Limitations
 
 > [!IMPORTANT]
 > AegisBox is an educational and platform engineering research sandbox. While it implements multi-layered defense-in-depth, no sandbox is invincible.
 
 ### Security Defenses
 - **Process Isolation**: Dedicated PID namespace; process cannot see host PID space.
-- **Filesystem Jailing**: Base rootfs is mounted strictly read-only; `/workspace` and `/tmp` are isolated `tmpfs` mounts.
+- **Filesystem Jailing**: Base rootfs is mounted strictly **read-only**; `/workspace` and `/tmp` are isolated `tmpfs` mounts.
 - **Network Egress**: Network namespaces without virtual ethernet interfaces guarantee zero network I/O.
 - **Resource Protection**: Cgroups v2 protects against memory exhaustion, CPU starvation, and fork-bomb attacks.
 - **Syscall Restrictions**: Seccomp filter blocks kernel manipulation, root pivot escapes, and ptrace interception.
@@ -221,7 +258,7 @@ gofmt -l .
 
 ---
 
-## 9. Medium Learning Series Outline
+## 11. Medium Learning Series Outline
 
 This codebase serves as the reference implementation for our comprehensive Medium engineering publication series:
 
@@ -232,4 +269,4 @@ This codebase serves as the reference implementation for our comprehensive Mediu
 5. **Part 5**: *Hard Resource Control: Mastering Cgroups v2 (Memory, CPU & Anti-Fork-Bombs)*
 6. **Part 6**: *Syscall Defense: Crafting Seccomp BPF Filters from Scratch*
 7. **Part 7**: *Building a Resilient Process Lifecycle & Execution Engine in Go*
-8. **Part 8**: *From Code to Cloud: Automated CI/CD & Systemd Deployment on Ubuntu*
+8. **Part 8**: *Continuous Delivery on Private Infrastructure: Automated Packaging, Manual Approval & Rollbacks*
