@@ -38,6 +38,9 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "__init__":
+		sandbox.RunChildInit()
+		os.Exit(0)
 	case "server":
 		runServer(os.Args[2:])
 	case "execute":

@@ -5,9 +5,13 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,15 +19,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxOutputBytes = 1024 * 1024 // 1 MB max buffer for stdout/stderr
-
 func (p *ProcessManager) executeOS(ctx context.Context, cfg *ExecutionConfig) (*executor.ExecutionResult, *ResourceUsage, error) {
 	tracker := NewCleanupTracker()
 	defer tracker.CleanupAll()
 
 	startTime := time.Now()
 
-	// 1. Setup Cgroups v2 Manager if requested
+	// 1. Setup Cgroups v2 Manager
 	var cgMgr CgroupManager
 	var cgErr error
 	if cfg.CgroupParent != "" {
@@ -43,7 +45,7 @@ func (p *ProcessManager) executeOS(ctx context.Context, cfg *ExecutionConfig) (*
 		}
 	}
 
-	// 2. Prepare Command
+	// 2. Prepare Command & Payload
 	if len(cfg.Command) == 0 {
 		return nil, nil, errors.New("empty command specified for execution")
 	}
@@ -51,10 +53,62 @@ func (p *ProcessManager) executeOS(ctx context.Context, cfg *ExecutionConfig) (*
 	execCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, cfg.Command[0], cfg.Command[1:]...)
-	cmd.Dir = cfg.WorkspaceDir
+	payload := ChildPayload{
+		Command:          cfg.Command,
+		WorkspaceDir:     cfg.WorkspaceDir,
+		RootfsDir:        cfg.RootfsDir,
+		EnableNamespaces: cfg.EnableNamespaces,
+		DisableNetwork:   cfg.DisableNetwork,
+		EnableSeccomp:    cfg.EnableSeccomp,
+		UID:              cfg.UID,
+		GID:              cfg.GID,
+		Seccomp:          DefaultSeccompPolicy(),
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to serialize child payload: %w", err)
+	}
 
-	// 3. Configure Namespaces if enabled
+	// 3. Create synchronization pipe to eliminate container startup race condition
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create sync pipe: %w", err)
+	}
+	defer rPipe.Close()
+	defer wPipe.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+
+	// 4. Resolve binary for execution (aegisbox __init__ or direct command)
+	selfExe, exeErr := os.Executable()
+	isTestBinary := (exeErr == nil && (strings.HasSuffix(selfExe, ".test") || strings.Contains(selfExe, "go-build")))
+
+	var launcherBinary string
+	if !isTestBinary && exeErr == nil && selfExe != "" {
+		launcherBinary = selfExe
+	} else if binCandidate, err := filepath.Abs("bin/aegisbox"); err == nil {
+		if _, statErr := os.Stat(binCandidate); statErr == nil {
+			launcherBinary = binCandidate
+		}
+	}
+
+	var cmd *exec.Cmd
+	useReExec := false
+
+	if launcherBinary != "" {
+		cmd = exec.CommandContext(execCtx, launcherBinary, "__init__")
+		cmd.Stdin = bytes.NewReader(payloadBytes)
+		cmd.ExtraFiles = []*os.File{rPipe} // Exposed as fd 3 in child process
+		useReExec = true
+	} else {
+		cmd = exec.CommandContext(execCtx, cfg.Command[0], cfg.Command[1:]...)
+	}
+
+	cmd.Dir = cfg.WorkspaceDir
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	// 5. Configure Namespaces
 	if cfg.EnableNamespaces {
 		nsCfg := NamespaceConfig{
 			NewPID:   true,
@@ -73,23 +127,20 @@ func (p *ProcessManager) executeOS(ctx context.Context, cfg *ExecutionConfig) (*
 		}
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-
-	// 4. Start child process (with unprivileged fallback if unprivileged user runs test)
+	// 6. Start container launcher child process
 	startErr := cmd.Start()
 	if startErr != nil {
+		// If unprivileged user namespace clone failed, fallback to direct execution without new namespaces
 		if cfg.EnableNamespaces {
-			// Retry with standard session attribute if unprivileged namespace creation was restricted
 			cmd = exec.CommandContext(execCtx, cfg.Command[0], cfg.Command[1:]...)
 			cmd.Dir = cfg.WorkspaceDir
 			cmd.Stdout = &stdoutBuf
 			cmd.Stderr = &stderrBuf
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 			if retryErr := cmd.Start(); retryErr != nil {
-				return nil, nil, fmt.Errorf("failed to start process: %w", retryErr)
+				return nil, nil, fmt.Errorf("failed to start process (fallback): %w", retryErr)
 			}
+			useReExec = false
 		} else {
 			return nil, nil, fmt.Errorf("failed to start process: %w", startErr)
 		}
@@ -97,16 +148,22 @@ func (p *ProcessManager) executeOS(ctx context.Context, cfg *ExecutionConfig) (*
 
 	childPID := cmd.Process.Pid
 
-	// 5. Attach child process into cgroup
+	// 7. Attach child process into cgroup BEFORE user code executes
 	if cgMgr != nil && childPID > 0 {
 		_ = cgMgr.AttachProcess(childPID)
 	}
 
-	// 6. Wait for process completion
+	// 8. Release child process from synchronization lock
+	if useReExec {
+		_, _ = wPipe.Write([]byte{1})
+		_ = wPipe.Close()
+	}
+
+	// 9. Wait for process completion
 	waitErr := cmd.Wait()
 	execDuration := time.Since(startTime)
 
-	// 7. Collect telemetry from Cgroup
+	// 10. Collect telemetry from Cgroup
 	var usage *ResourceUsage
 	if cgMgr != nil {
 		usage, _ = cgMgr.CollectMetrics()
@@ -116,7 +173,7 @@ func (p *ProcessManager) executeOS(ctx context.Context, cfg *ExecutionConfig) (*
 	}
 	usage.ExecutionTimeMs = execDuration.Milliseconds()
 
-	// 8. Format initial result
+	// 11. Format initial result
 	res := &executor.ExecutionResult{
 		ExecutionID:      cfg.ExecutionID,
 		Stdout:           stdoutBuf.String(),

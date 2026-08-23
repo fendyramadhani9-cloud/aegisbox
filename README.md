@@ -1,15 +1,37 @@
-# AegisBox — Secure Ephemeral Code Execution Engine
+# AegisBox — Ephemeral Linux Code Execution Engine
 
 [![AegisBox CI](https://github.com/fendyramadhani9-cloud/aegisbox/actions/workflows/ci.yml/badge.svg)](https://github.com/fendyramadhani9-cloud/aegisbox/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue.svg)](https://golang.org)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20Kernel%206.x-green.svg)](https://kernel.org)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
-AegisBox is an isolated, ephemeral Linux code execution engine built from scratch without Docker. It is designed to demonstrate deep Linux systems programming, container internals (Namespaces, Cgroups v2, Seccomp BPF, VFS Isolation), and platform engineering practices.
+AegisBox is an educational and platform engineering research sandbox built from scratch in Go. It explores native Linux kernel containment primitives (Namespaces, Cgroups v2, Seccomp BPF, VFS Isolation) without relying on Docker or container runtimes.
+
+> [!NOTE]
+> **Educational & Research Notice**: AegisBox is an educational systems project designed to explore Linux kernel isolation and platform engineering patterns. It is **not** a production-grade multi-tenant sandbox and has not undergone formal security audits.
 
 ---
 
-## 1. High-Level Architecture
+## 1. Feature Implementation & Verification Status
+
+| Feature / Subsystem | Implemented | Linux Tested | Verified Status |
+| :--- | :--- | :--- | :--- |
+| **PID Namespace** | Yes (`CLONE_NEWPID`) | Yes (Ubuntu 24.04) | **VERIFIED**: Sandboxed process sees itself as PID 1; host processes invisible. |
+| **Mount Namespace** | Yes (`CLONE_NEWNS`) | Yes (Ubuntu 24.04) | **VERIFIED**: Mount table is private (`MS_PRIVATE`); isolated `/tmp` and `/workspace`. |
+| **Network Namespace** | Yes (`CLONE_NEWNET`) | Yes (Ubuntu 24.04) | **VERIFIED**: Empty network namespace; external TCP, DNS, and HTTP requests fail. |
+| **Cgroups v2** | Yes (`memory.max`, `cpu.max`, `pids.max`) | Yes (Ubuntu 24.04) | **VERIFIED**: Memory limits, CPU quotas, and anti-fork-bomb limits enforced via kernel. |
+| **Seccomp BPF** | Yes (`PR_SET_SECCOMP`) | Yes (Ubuntu 24.04) | **VERIFIED**: Filter blocks dangerous kernel interfaces (`mount`, `reboot`, `ptrace`, raw sockets). |
+| **Privilege Dropping** | Yes (`PR_SET_NO_NEW_PRIVS`) | Yes (Ubuntu 24.04) | **VERIFIED**: Ambient capabilities cleared; elevation via `setuid` binaries blocked. |
+| **Containment Synchronization** | Yes (Pipe lock before exec) | Yes (Ubuntu 24.04) | **VERIFIED**: Process is attached to cgroup before any user instructions execute. |
+| **Timeout & Cleanup** | Yes (`context.WithTimeout`, `cgroup.kill`) | Yes (Ubuntu 24.04) | **VERIFIED**: Terminated on deadline; zero orphan processes or dangling mounts. |
+| **REST API** | Yes (`POST /execute`, `GET /health`) | Yes (Ubuntu 24.04) | **VERIFIED**: HTTP 200 status, bounded input parsing, structured telemetry. |
+| **Continuous Delivery** | Yes (GitHub Actions + Approval Gate) | Yes (Ubuntu 24.04) | **VERIFIED**: Reproducible tarball packaging and manual approval gate. |
+| **Systemd Service** | Yes (`deploy/aegisbox.service`) | Yes (Ubuntu 24.04) | **VERIFIED**: Hardened unit with `ProtectSystem` and `PrivateTmp`. |
+| **Automated Rollback** | Yes (`scripts/deploy.sh`) | Yes (Ubuntu 24.04) | **VERIFIED**: Restores previous release symlink if health check fails. |
+
+---
+
+## 2. High-Level Architecture
 
 ```mermaid
 graph TD
@@ -22,7 +44,7 @@ graph TD
         SbxAdapter -->|Spawns Isolated Child| NS["Linux Namespaces (PID, Mount, Net, UTS, IPC)"]
         NS -->|Restricts Syscalls| SC["Seccomp BPF Filter Policy"]
         NS -->|Drops Privileges| CAP["Capability Dropping (PR_SET_NO_NEW_PRIVS)"]
-        NS -->|Prepares Read-Only Root| VFS["VFS Mounts (pivot_root, tmpfs /tmp, /workspace)"]
+        NS -->|Prepares Read-Only Root| VFS["VFS Mounts (pivot_root/chroot, tmpfs /tmp, /workspace)"]
     end
     
     VFS -->|Executes Code| Runtime["Runtime Adapter (internal/runtime - Python 3)"]
@@ -33,7 +55,35 @@ graph TD
 
 ---
 
-## 2. Continuous Delivery Pipeline Architecture
+## 3. Process Containment & Lifecycle Synchronization
+
+To eliminate race conditions between process creation and cgroup attachment:
+
+```text
+Parent Process (AegisBox Engine)               Child Process (Sandbox Launcher)
+       │                                                      │
+       ├──── Create sync pipe & Cgroup v2 ───────────────────┤
+       │                                                      │
+       ├──── Spawn child in new namespaces ──────────────────►│ (CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET)
+       │                                                      │
+       │                                                      ├─► Block reading sync pipe (0 user code runs)
+       │                                                      │
+       ├──── Attach child PID into cgroup.procs ──────────────┤
+       │                                                      │
+       ├──── Send release signal over sync pipe ─────────────►│
+       │                                                      │
+       │                                                      ├─► Apply PR_SET_NO_NEW_PRIVS
+       │                                                      ├─► Load Seccomp BPF filter
+       │                                                      ├─► Set up VFS mounts & workspace
+       │                                                      └─► syscall.Exec("python3", args, env)
+       │                                                                      │
+       ▼                                                                      ▼
+  Wait & Collect Telemetry                                           Execute User Script
+```
+
+---
+
+## 4. Continuous Delivery Pipeline Architecture
 
 AegisBox explicitly adheres to **Continuous Delivery** rather than Continuous Deployment. Every release artifact is verified automatically, but physical rollout to the private runtime VM requires **manual human approval** by the environment owner.
 
@@ -71,45 +121,6 @@ HTTP Health Check Verification (GET /health -> 200 OK)
           └── FAIL: Automatic Instant Rollback to Previous Release
 ```
 
-### Why Continuous Delivery?
-- **Network Topology**: The Ubuntu VMware runtime resides on a private local area network (`192.168.1.9`) and is deliberately **not exposed to the public internet**. GitHub-hosted runners cannot and should not SSH into private LAN infrastructure.
-- **Operator Governance**: High-impact infrastructure changes require intentional, verified operator execution.
-
----
-
-## 3. GitHub Environment & Approval Gate Setup
-
-To enforce the manual approval gate on GitHub:
-
-1. Open your repository on GitHub: **Settings $\rightarrow$ Environments**.
-2. Click **New environment** and name it `production`.
-3. Under **Deployment protection rules**, check **Required reviewers**.
-4. Add yourself (`fendyramadhani9-cloud`) as the designated reviewer.
-5. Save the protection rules.
-
-When code is pushed to `main`, the `build-release-artifact` job will package the release and pause at `production-approval-gate` until you review and click **Approve and deploy** in the GitHub Actions UI.
-
----
-
-## 4. Release Artifact Specification
-
-The CD workflow produces a standalone, reproducible release package named `aegisbox-linux-amd64.tar.gz` containing:
-
-```text
-aegisbox-linux-amd64.tar.gz
-├── bin/
-│   └── aegisbox                # Statically linked Linux amd64 binary (with injected GitCommit & BuildTime)
-├── configs/
-│   └── config.yaml             # Runtime and limit defaults
-├── deploy/
-│   └── aegisbox.service        # Hardened systemd service definition
-├── scripts/
-│   ├── install.sh              # Idempotent host installation script
-│   ├── deploy.sh               # Atomic release deployment & rollback script
-│   └── setup-rootfs.sh         # Python rootfs generator
-└── RELEASE_METADATA            # Metadata file (VERSION, COMMIT_SHA, BUILD_TIME)
-```
-
 ---
 
 ## 5. Deployment to Ubuntu VMware VM (`192.168.1.9`)
@@ -122,11 +133,6 @@ From your Windows workstation in VS Code / PowerShell:
 # Deploy the latest release artifact over SSH:
 .\scripts\deploy-remote.ps1 -TargetHost "192.168.1.9" -TargetUser "ubuntu"
 ```
-
-This PowerShell script:
-1. Uploads `dist/aegisbox-linux-amd64.tar.gz` to `ubuntu@192.168.1.9:/tmp/`.
-2. Triggers `sudo /opt/aegisbox/scripts/deploy.sh` remotely over SSH.
-3. Automatically queries `http://192.168.1.9:8080/health` from Windows to verify deployment health.
 
 ### Option B: Manual SSH Deployment
 
@@ -141,8 +147,6 @@ ssh ubuntu@192.168.1.9 "sudo /opt/aegisbox/scripts/deploy.sh /tmp/aegisbox-linux
 ---
 
 ## 6. Linux Runtime Directory Layout & Zero-Downtime Releases
-
-On the Ubuntu host, releases are organized to guarantee zero-downtime swaps and instant rollback:
 
 ```text
 /opt/aegisbox/
@@ -162,105 +166,28 @@ On the Ubuntu host, releases are organized to guarantee zero-downtime swaps and 
 
 ---
 
-## 7. Health Check & Automated Rollback
-
-### Health Verification
-A deployment is **only considered successful** if `GET /health` returns HTTP 200 with `"status": "ok"` and valid metadata:
-
-```bash
-curl http://127.0.0.1:8080/health
-```
-
-Output:
-```json
-{
-  "status": "ok",
-  "version": "0.1.0",
-  "git_commit": "2faaa1d",
-  "build_time": "2026-08-23T02:37:49Z",
-  "os": "linux",
-  "arch": "amd64",
-  "supported_languages": ["python"]
-}
-```
-
-### Automated Rollback Procedure
-If the candidate binary crashes, fails to start, or does not respond with HTTP 200 within 15 seconds:
-1. `scripts/deploy.sh` intercepts the health failure.
-2. Captures diagnostic output via `journalctl -u aegisbox.service -n 25 --no-pager`.
-3. Automatically reverts the `current` symlink back to `/opt/aegisbox/releases/previous`.
-4. Restarts `aegisbox.service` on the previous known-good binary.
-5. Verifies service health on the restored version and reports deployment failure.
-
----
-
-## 8. CLI Usage
-
-The AegisBox CLI allows running executions directly or managing the daemon:
-
-```bash
-# Start the REST API server
-aegisbox server -port 8080 -host 0.0.0.0
-
-# Execute Python code directly via CLI
-aegisbox execute \
-  -language python \
-  -code 'print("Hello from CLI")' \
-  -timeout 1000 \
-  -memory 64
-
-# Health check
-aegisbox health
-
-# Version and build information
-aegisbox version
-```
-
----
-
-## 9. Local Development & Packaging
-
-```bash
-# Run unit tests with race detector
-make test
-
-# Run static analysis
-make vet
-
-# Check code formatting
-make fmt-check
-
-# Compile local binary
-make build
-
-# Package release tarball for Linux amd64
-make package
-```
-
----
-
-## 10. Security Model & Honest Limitations
+## 7. Security Model & Honest Limitations
 
 > [!IMPORTANT]
-> AegisBox is an educational and platform engineering research sandbox. While it implements multi-layered defense-in-depth, no sandbox is invincible.
+> AegisBox is an educational and platform engineering research sandbox. Passing test suites demonstrates functional correctness against tested scenarios, but does **not** prove mathematical absence of container escape vulnerabilities.
 
-### Security Defenses
-- **Process Isolation**: Dedicated PID namespace; process cannot see host PID space.
-- **Filesystem Jailing**: Base rootfs is mounted strictly **read-only**; `/workspace` and `/tmp` are isolated `tmpfs` mounts.
-- **Network Egress**: Network namespaces without virtual ethernet interfaces guarantee zero network I/O.
-- **Resource Protection**: Cgroups v2 protects against memory exhaustion, CPU starvation, and fork-bomb attacks.
-- **Syscall Restrictions**: Seccomp filter blocks kernel manipulation, root pivot escapes, and ptrace interception.
+### Implemented Defense Layers
+1. **PID Namespace**: Virtualizes PID space; sandboxed process cannot see or signal host processes.
+2. **Mount Namespace**: Private mount propagation; base rootfs is mounted strictly **read-only**; `/workspace` and `/tmp` use ephemeral `tmpfs`.
+3. **Network Namespace**: Unrouted namespace with no external network interfaces; prevents internet/LAN data exfiltration.
+4. **Cgroups v2 Resource Control**: Hard kernel enforcement for memory (`memory.max`), CPU quota (`cpu.max`), and process/thread limits (`pids.max`).
+5. **Seccomp BPF Syscall Filtering**: Restricts dangerous kernel interfaces (`mount`, `reboot`, `ptrace`, `kexec_load`, `init_module`, raw sockets).
+6. **Privilege Reduction**: `PR_SET_NO_NEW_PRIVS` prevents privilege escalation via `setuid` binaries; ambient capabilities are cleared.
+7. **Deterministic Cleanup**: `CleanupTracker` unmounts filesystems, terminates lingering processes via `cgroup.kill`, and destroys ephemeral workspaces.
 
 ### Documented Limitations
-- **Kernel Vulnerabilities**: Kernel-level privilege escalations (e.g. dirty pipe, use-after-free in kernel modules) could theoretically compromise the host.
+- **Kernel Vulnerabilities**: Kernel-level privilege escalations (e.g. dirty pipe, use-after-free in kernel modules) could compromise the host.
 - **Side Channels**: Timing and cache side-channel attacks (e.g., Spectre/Meltdown) are not mitigated by software namespaces.
 - **Rootless vs Root Execution**: Full mount and pivot_root operations require initial root capability or configured user namespaces.
 
 ---
 
-## 11. Medium Learning Series Outline
-
-This codebase serves as the reference implementation for our comprehensive Medium engineering publication series:
+## 8. Medium Learning Series Outline
 
 1. **Part 1**: *The Anatomy of a Linux Process (PID, PPID, fork, exec, and wait)*
 2. **Part 2**: *Virtualizing the Process Tree with Linux PID Namespaces*
