@@ -1,0 +1,71 @@
+name: AegisBox CD Deployment
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    name: Deploy to Ubuntu Linux Server
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build Linux Binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -v -o bin/aegisbox ./cmd/aegisbox
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        if: env.DEPLOY_HOST != ''
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            mkdir -p /opt/aegisbox/bin /opt/aegisbox/config /opt/aegisbox/rootfs
+            systemctl stop aegisbox.service || true
+
+      - name: Transfer Binary & Assets
+        uses: appleboy/scp-action@v0.1.7
+        if: env.DEPLOY_HOST != ''
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "bin/aegisbox,configs/config.yaml,scripts/*,deploy/*"
+          target: "/opt/aegisbox"
+
+      - name: Restart Service & Verify Health
+        uses: appleboy/ssh-action@v1.0.3
+        if: env.DEPLOY_HOST != ''
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            chmod +x /opt/aegisbox/bin/aegisbox /opt/aegisbox/scripts/*.sh
+            cp /opt/aegisbox/deploy/aegisbox.service /etc/systemd/system/aegisbox.service
+            systemctl daemon-reload
+            systemctl restart aegisbox.service
+            /opt/aegisbox/scripts/deploy.sh 127.0.0.1 8080

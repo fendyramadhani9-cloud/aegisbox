@@ -1,145 +1,196 @@
 # AegisBox — Secure Ephemeral Code Execution Engine
 
-AegisBox is an isolated, ephemeral code execution engine designed for educational and platform engineering exploration. Conceptualized after modern online judges, automated grading systems, and sandboxed cloud compute engines, AegisBox leverages native Linux kernel primitives to safely execute untrusted code.
+[![AegisBox CI](https://github.com/fendyramadhani9-cloud/aegisbox/actions/workflows/ci.yml/badge.svg)](https://github.com/fendyramadhani9-cloud/aegisbox/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue.svg)](https://golang.org)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20Kernel%206.x-green.svg)](https://kernel.org)
+[![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
+
+AegisBox is an isolated, ephemeral Linux code execution engine built from scratch without Docker. It is designed to demonstrate deep Linux systems programming, container internals (Namespaces, Cgroups v2, Seccomp BPF, VFS Isolation), and platform engineering practices.
 
 ---
 
-## 1. Project Goals
+## 1. High-Level Architecture
 
-1. **Native Linux Isolation**: Understand and implement containerization fundamentals from scratch without Docker (PID/Mount/Network/User namespaces, Cgroups v2, Seccomp, and ephemeral root filesystems).
-2. **Deterministic Resource Enforcement**: Prevent rogue executions, memory leaks, fork bombs, and CPU hogging using granular Linux cgroups v2.
-3. **Defense in Depth**: Layered containment ensuring the sandboxed process perceives itself as an isolated guest with strictly zero host filesystem or network access.
-4. **Observable & Extensible**: Modular runtime design supporting multiple languages (starting with Python 3), structured JSON telemetry, and RESTful execution lifecycle APIs.
-5. **Engineering Rigor**: Production-ready project structure, strict validation, comprehensive testing, and automated CI/CD.
-
----
-
-## 2. Current Project State: Milestone 1
-
-> **Current Milestone**: **Milestone 1 — Project Foundation & Domain Contracts**
-
-In Milestone 1, we establish the core project layout, domain types, configuration system, and automated CI pipeline. No sandbox primitives are executed yet; this foundation guarantees architectural stability for subsequent isolation layers.
-
-### Project Layout
-
-```text
-aegisbox/
-├── .github/
-│   └── workflows/
-│       └── ci.yml          # GitHub Actions CI (gofmt, vet, test, build)
-├── cmd/
-│   └── aegisbox/
-│       └── main.go         # Application CLI entrypoint & health check
-├── configs/
-│   └── config.yaml         # Default runtime and server configuration
-├── internal/
-│   ├── api/                # REST API routes & handlers (Milestone 8)
-│   ├── config/             # Configuration parsing, validation & environment loading
-│   ├── executor/           # Domain contracts (ExecutionRequest, ExecutionResult, Status)
-│   ├── runtime/            # Runtime adapters (Python, etc.) (Milestone 2)
-│   └── sandbox/            # Namespaces, cgroups v2, rootfs, and seccomp (Milestones 3-6)
-├── scripts/                # Rootfs generation and operational scripts
-├── tests/                  # Integration and foundation test suite
-├── .gitignore              # Git ignore rules for Go and build outputs
-├── go.mod                  # Go module definition
-├── Makefile                # Multi-platform build and test targets
-└── README.md               # Project documentation
+```mermaid
+graph TD
+    Client["Client (CLI / Web / API)"] -->|POST /execute| Router["API Router (internal/api)"]
+    Router -->|ExecutionRequest| ExecMgr["Execution Manager (internal/executor)"]
+    ExecMgr -->|Acquires Sandbox| SbxAdapter["Sandbox Adapter (internal/sandbox)"]
+    
+    subgraph Linux Kernel Containment
+        SbxAdapter -->|Configures Limits| CG["Cgroups v2 (/sys/fs/cgroup/aegisbox/<id>)"]
+        SbxAdapter -->|Spawns Isolated Child| NS["Linux Namespaces (PID, Mount, Net, UTS, IPC)"]
+        NS -->|Restricts Syscalls| SC["Seccomp BPF Filter Policy"]
+        NS -->|Drops Privileges| CAP["Capability Dropping (PR_SET_NO_NEW_PRIVS)"]
+        NS -->|Prepares Read-Only Root| VFS["VFS Mounts (pivot_root, tmpfs /tmp, /workspace)"]
+    end
+    
+    VFS -->|Executes Code| Runtime["Runtime Adapter (internal/runtime - Python 3)"]
+    Runtime -->|Captures I/O & Telemetry| Collector["Result Classifier & Telemetry"]
+    Collector -->|Cleaned Result| ExecMgr
+    ExecMgr -->|Structured JSON Response| Client
 ```
 
 ---
 
-## 3. Development & Runtime Architecture
+## 2. Core Linux Isolation Mechanisms
 
-AegisBox is built using a **dual-environment development model**:
+AegisBox avoids third-party container engines (Docker, containerd) and implements Linux kernel containment primitives directly:
+
+| Layer | Kernel Mechanism | AegisBox Implementation | Defense Purpose |
+| :--- | :--- | :--- | :--- |
+| **Process Tree** | `CLONE_NEWPID` | `namespace_linux.go` | Sandboxed process perceives itself as PID 1; cannot inspect or signal host processes. |
+| **Filesystem Mounts** | `CLONE_NEWNS` + `pivot_root` | `mount_linux.go` | Read-only base rootfs template, ephemeral `tmpfs` `/workspace` and `/tmp`, isolated `/proc`. Host `/` is completely hidden. |
+| **Networking** | `CLONE_NEWNET` | `namespace_linux.go` | New empty network namespace with zero external routes; disables internet access and LAN egress. |
+| **Resource Limits** | Cgroups v2 | `cgroup_linux.go` | Enforces `memory.max`, `memory.swap.max`, `cpu.max`, and `pids.max` (anti-fork-bomb). |
+| **Syscall Defense** | Seccomp BPF | `seccomp_linux.go` | Blocks dangerous kernel calls (`mount`, `reboot`, `ptrace`, `kexec_load`, `init_module`, raw sockets). |
+| **Privilege Reduction** | `PR_SET_NO_NEW_PRIVS` | `capabilities_linux.go` | Clears ambient capabilities and prevents gaining root via `setuid` binaries. |
+| **Deterministic Cleanup** | `CleanupTracker` | `cleanup.go` | Guaranteed teardown of mounts, cgroup destruction (`cgroup.kill`), and ephemeral workspace removal. |
+
+---
+
+## 3. Development & Runtime Workflow
+
+AegisBox uses a **dual-environment development lifecycle**:
 
 ```text
-[ Windows Development Workstation ]
+[ Windows 11 Workstation ]
   ├── VS Code / PowerShell
-  ├── Go Toolchain & Git
-  └── Local Verification / Unit Tests
+  ├── Cross-platform Go compilation
+  └── Generic unit tests & API mocks
             │
             ▼ (git push)
-[ GitHub Repository & Actions CI ]
-  ├── gofmt verification
+[ GitHub Actions CI / CD ]
+  ├── gofmt formatting verification
   ├── go vet static analysis
-  ├── go test -v -race (Linux runner)
-  └── binary compilation & smoke checks
+  ├── go test -race unit tests
+  └── automated binary compilation
             │
             ▼ (deploy)
-[ Ubuntu Linux Runtime Target ]
-  ├── Linux Kernel (cgroups v2, namespaces, seccomp)
-  ├── AegisBox Systemd Service
-  └── Ephemeral Sandboxed User Processes
+[ Ubuntu Linux Host ]
+  ├── Linux Kernel 6.x (Cgroups v2, Namespaces, Seccomp)
+  ├── Minimal RootFS Template (/opt/aegisbox/rootfs/python)
+  └── AegisBox Systemd Daemon (aegisbox.service)
 ```
-
-- **Development**: Windows with Go, Git, and VS Code for authoring and unit-testing core logic.
-- **Runtime Host**: Ubuntu Linux machine where Linux kernel mechanisms (`unshare`, `cgroups v2`, `seccomp`, `pivot_root`) are natively available.
 
 ---
 
-## 4. Domain Contracts
+## 4. REST API Specification
 
-### Execution Request
+### `POST /execute`
 
+Executes source code inside an isolated ephemeral sandbox.
+
+#### Request Body
 ```json
 {
   "language": "python",
-  "code": "print('Hello, AegisBox!')",
+  "code": "import sys\nprint('Hello from AegisBox!')",
   "timeout_ms": 1000,
   "max_mem_mb": 64,
   "max_processes": 10
 }
 ```
 
-### Execution Result
-
+#### Response Body
 ```json
 {
-  "execution_id": "exec-9f8a3c",
+  "execution_id": "exec-4a9b2c8f1e",
   "status": "COMPLETED",
-  "stdout": "Hello, AegisBox!\n",
+  "stdout": "Hello from AegisBox!\n",
   "stderr": "",
   "exit_code": 0,
-  "execution_time_ms": 18,
-  "memory_usage_bytes": 14680064
+  "execution_time_ms": 19,
+  "memory_usage_bytes": 14680064,
+  "cpu_time_ms": 12
 }
 ```
 
 ### Supported Execution Statuses
 
-- `COMPLETED`: Normal termination with exit code 0 or handled script exit.
-- `RUNTIME_ERROR`: Script encountered an unhandled exception or non-zero exit code.
-- `TIME_LIMIT_EXCEEDED`: Wall-clock execution exceeded configured timeout.
-- `OOM_KILLED`: Exceeded memory allocation and terminated by kernel cgroup OOM killer.
-- `PROCESS_LIMIT_EXCEEDED`: Process/thread creation exceeded `pids.max`.
-- `START_ERROR`: Failure to initialize the sandbox environment.
-- `SANDBOX_ERROR`: Internal containment error or cleanup failure.
+- `COMPLETED`: Script completed normally (exit code 0).
+- `RUNTIME_ERROR`: Script encountered an uncaught exception or non-zero exit code.
+- `TIME_LIMIT_EXCEEDED`: Execution exceeded configured wall-clock timeout.
+- `OOM_KILLED`: Process exceeded allocated memory limit (`memory.max`).
+- `PROCESS_LIMIT_EXCEEDED`: Process/thread creation exceeded `pids.max` (fork-bomb prevented).
+- `START_ERROR`: Initialization or runtime preparation failure.
+- `SANDBOX_ERROR`: Internal containment error.
 - `UNSUPPORTED_LANGUAGE`: Requested runtime is not registered.
+
+### `GET /health`
+
+Returns diagnostic and operational health metadata:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "os": "linux",
+  "arch": "amd64",
+  "supported_languages": ["python"]
+}
+```
 
 ---
 
-## 5. Local Development & Testing
+## 5. CLI Usage
 
-### Building Locally
+The AegisBox CLI allows running executions directly or managing the daemon:
 
 ```bash
-# Build the binary
-go build -v -o bin/aegisbox ./cmd/aegisbox
+# Start the REST API server
+aegisbox server -port 8080 -host 0.0.0.0
 
-# Run health diagnostics
-./bin/aegisbox -health
+# Execute Python code directly via CLI
+aegisbox execute \
+  -language python \
+  -code 'print("Hello from CLI")' \
+  -timeout 1000 \
+  -memory 64
 
-# Check version
-./bin/aegisbox -version
+# Health check
+aegisbox health
+
+# Version information
+aegisbox version
 ```
 
-### Running Tests
+---
+
+## 6. Linux Installation & Systemd Deployment
+
+### Step 1: Clone and Build
+```bash
+git clone https://github.com/fendyramadhani9-cloud/aegisbox.git
+cd aegisbox
+make build
+```
+
+### Step 2: System Installation
+```bash
+sudo ./scripts/install.sh
+```
+
+This script:
+1. Installs the binary to `/usr/local/bin/aegisbox`.
+2. Creates directory hierarchy at `/opt/aegisbox`.
+3. Prepares the minimal Python rootfs at `/opt/aegisbox/rootfs/python`.
+4. Installs the systemd unit file at `/etc/systemd/system/aegisbox.service`.
+
+### Step 3: Manage Systemd Service
+```bash
+sudo systemctl enable --now aegisbox.service
+sudo systemctl status aegisbox.service
+```
+
+---
+
+## 7. Testing & Verification
+
+Run the full automated test suite:
 
 ```bash
-# Run all unit and foundation tests
-go test -v ./...
-
-# Run tests with race detection (Linux / WSL)
+# Run all unit and integration tests with race detector
 go test -v -race ./...
 
 # Run static analysis
@@ -149,37 +200,36 @@ go vet ./...
 gofmt -l .
 ```
 
-Using `make` (if Make is installed):
+---
 
-```bash
-make fmt-check
-make vet
-make test
-make build
-```
+## 8. Security Model & Honest Limitations
+
+> [!IMPORTANT]
+> AegisBox is an educational and platform engineering research sandbox. While it implements multi-layered defense-in-depth, no sandbox is invincible.
+
+### Security Defenses
+- **Process Isolation**: Dedicated PID namespace; process cannot see host PID space.
+- **Filesystem Jailing**: Base rootfs is mounted strictly read-only; `/workspace` and `/tmp` are isolated `tmpfs` mounts.
+- **Network Egress**: Network namespaces without virtual ethernet interfaces guarantee zero network I/O.
+- **Resource Protection**: Cgroups v2 protects against memory exhaustion, CPU starvation, and fork-bomb attacks.
+- **Syscall Restrictions**: Seccomp filter blocks kernel manipulation, root pivot escapes, and ptrace interception.
+
+### Documented Limitations
+- **Kernel Vulnerabilities**: Kernel-level privilege escalations (e.g. dirty pipe, use-after-free in kernel modules) could theoretically compromise the host.
+- **Side Channels**: Timing and cache side-channel attacks (e.g., Spectre/Meltdown) are not mitigated by software namespaces.
+- **Rootless vs Root Execution**: Full mount and pivot_root operations require initial root capability or configured user namespaces.
 
 ---
 
-## 6. Continuous Integration (CI)
+## 9. Medium Learning Series Outline
 
-Every push and pull request triggers `.github/workflows/ci.yml`:
-1. **Formatting Check**: Verifies all code complies with `gofmt`.
-2. **Static Analysis**: Runs `go vet` to catch potential bugs and structural errors.
-3. **Unit Tests**: Runs the test suite with `-race` enabled on a native Linux runner.
-4. **Compilation**: Compiles the `aegisbox` executable.
-5. **Smoke Execution**: Executes `./bin/aegisbox -version` and `./bin/aegisbox -health` to confirm binary functionality.
+This codebase serves as the reference implementation for our comprehensive Medium engineering publication series:
 
----
-
-## 7. Roadmap
-
-- [x] **Milestone 1**: Project Foundation & Domain Contracts
-- [ ] **Milestone 2**: Ephemeral Rootfs & Runtime Abstraction
-- [ ] **Milestone 3**: Process Isolation & Linux Namespaces
-- [ ] **Milestone 4**: Cgroups v2 Resource Controller
-- [ ] **Milestone 5**: Filesystem Isolation & Ephemeral Workspaces
-- [ ] **Milestone 6**: Syscall Defense with Seccomp
-- [ ] **Milestone 7**: Execution Engine & Process Guardian
-- [ ] **Milestone 8**: REST API & Observability
-- [ ] **Milestone 9**: End-to-End Testing & Security Verification
-- [ ] **Milestone 10**: Linux Systemd Deployment & CI/CD Pipeline
+1. **Part 1**: *The Anatomy of a Linux Process (PID, PPID, fork, exec, and wait)*
+2. **Part 2**: *Virtualizing the Process Tree with Linux PID Namespaces*
+3. **Part 3**: *Filesystem Jailing: Read-Only RootFS, Mount Namespaces & pivot_root*
+4. **Part 4**: *Zero-Trust Networking: Isolating Sandboxes with Network Namespaces*
+5. **Part 5**: *Hard Resource Control: Mastering Cgroups v2 (Memory, CPU & Anti-Fork-Bombs)*
+6. **Part 6**: *Syscall Defense: Crafting Seccomp BPF Filters from Scratch*
+7. **Part 7**: *Building a Resilient Process Lifecycle & Execution Engine in Go*
+8. **Part 8**: *From Code to Cloud: Automated CI/CD & Systemd Deployment on Ubuntu*
