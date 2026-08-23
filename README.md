@@ -21,7 +21,7 @@ AegisBox is an educational and platform engineering research sandbox built from 
 | **Network Namespace** | Yes (`CLONE_NEWNET`) | Yes (Ubuntu 24.04) | **VERIFIED**: Empty network namespace; external TCP, DNS, and HTTP requests fail. |
 | **Cgroups v2** | Yes (`memory.max`, `cpu.max`, `pids.max`) | Yes (Ubuntu 24.04) | **VERIFIED**: Memory limits, CPU quotas, and anti-fork-bomb limits enforced via kernel. |
 | **Seccomp BPF** | Yes (`PR_SET_SECCOMP`) | Yes (Ubuntu 24.04) | **VERIFIED**: Filter blocks dangerous kernel interfaces (`mount`, `reboot`, `ptrace`, raw sockets). |
-| **Privilege Dropping** | Yes (`PR_SET_NO_NEW_PRIVS`) | Yes (Ubuntu 24.04) | **VERIFIED**: Ambient capabilities cleared; elevation via `setuid` binaries blocked. |
+| **Privilege Dropping** | Yes (`PR_SET_NO_NEW_PRIVS`, credential drop) | Yes (Ubuntu 24.04) | **VERIFIED**: Ambient capabilities cleared; credential dropped to UID 1000 under root. |
 | **Containment Synchronization** | Yes (Pipe lock before exec) | Yes (Ubuntu 24.04) | **VERIFIED**: Process is attached to cgroup before any user instructions execute. |
 | **Timeout & Cleanup** | Yes (`context.WithTimeout`, `cgroup.kill`) | Yes (Ubuntu 24.04) | **VERIFIED**: Terminated on deadline; zero orphan processes or dangling mounts. |
 | **REST API** | Yes (`POST /execute`, `GET /health`) | Yes (Ubuntu 24.04) | **VERIFIED**: HTTP 200 status, bounded input parsing, structured telemetry. |
@@ -156,9 +156,9 @@ ssh ubuntu@192.168.1.9 "sudo /opt/aegisbox/scripts/deploy.sh /tmp/aegisbox-linux
 │   └── config.yaml -> /opt/aegisbox/releases/current/configs/config.yaml
 ├── releases/
 │   ├── 6adc3d0/                # Release directory for commit 6adc3d0
-│   ├── 2faaa1d/                # Release directory for commit 2faaa1d
+│   ├── 857b7ac/                # Release directory for commit 857b7ac
 │   ├── previous -> 6adc3d0/    # Pointer to previous known-good release
-│   └── current -> 2faaa1d/     # Active release symlink
+│   └── current -> 857b7ac/     # Active release symlink
 ├── rootfs/
 │   └── python/                 # Reusable minimal Python 3 rootfs template
 └── workspaces/                 # Ephemeral per-execution directories
@@ -166,7 +166,48 @@ ssh ubuntu@192.168.1.9 "sudo /opt/aegisbox/scripts/deploy.sh /tmp/aegisbox-linux
 
 ---
 
-## 7. Security Model & Honest Limitations
+## 7. CLI Usage & Local Development
+
+### CLI Commands
+```bash
+# Start the REST API server daemon
+aegisbox server -port 8080 -host 0.0.0.0
+
+# Execute Python code directly via CLI
+aegisbox execute \
+  -language python \
+  -code 'print("Hello from AegisBox CLI")' \
+  -timeout 1000 \
+  -memory 64
+
+# Health check diagnostics
+aegisbox health
+
+# Version and build metadata
+aegisbox version
+```
+
+### Development Targets
+```bash
+# Run unit & integration tests with race detector
+make test
+
+# Run static analysis
+make vet
+
+# Check code formatting
+make fmt-check
+
+# Compile binary
+make build
+
+# Package release tarball for Linux amd64
+make package
+```
+
+---
+
+## 8. Security Model & Honest Limitations
 
 > [!IMPORTANT]
 > AegisBox is an educational and platform engineering research sandbox. Passing test suites demonstrates functional correctness against tested scenarios, but does **not** prove mathematical absence of container escape vulnerabilities.
@@ -177,23 +218,10 @@ ssh ubuntu@192.168.1.9 "sudo /opt/aegisbox/scripts/deploy.sh /tmp/aegisbox-linux
 3. **Network Namespace**: Unrouted namespace with no external network interfaces; prevents internet/LAN data exfiltration.
 4. **Cgroups v2 Resource Control**: Hard kernel enforcement for memory (`memory.max`), CPU quota (`cpu.max`), and process/thread limits (`pids.max`).
 5. **Seccomp BPF Syscall Filtering**: Restricts dangerous kernel interfaces (`mount`, `reboot`, `ptrace`, `kexec_load`, `init_module`, raw sockets).
-6. **Privilege Reduction**: `PR_SET_NO_NEW_PRIVS` prevents privilege escalation via `setuid` binaries; ambient capabilities are cleared.
+6. **Privilege Reduction**: `PR_SET_NO_NEW_PRIVS` prevents privilege escalation via `setuid` binaries; credentials drop to UID 1000 under root.
 7. **Deterministic Cleanup**: `CleanupTracker` unmounts filesystems, terminates lingering processes via `cgroup.kill`, and destroys ephemeral workspaces.
 
 ### Documented Limitations
 - **Kernel Vulnerabilities**: Kernel-level privilege escalations (e.g. dirty pipe, use-after-free in kernel modules) could compromise the host.
 - **Side Channels**: Timing and cache side-channel attacks (e.g., Spectre/Meltdown) are not mitigated by software namespaces.
 - **Rootless vs Root Execution**: Full mount and pivot_root operations require initial root capability or configured user namespaces.
-
----
-
-## 8. Medium Learning Series Outline
-
-1. **Part 1**: *The Anatomy of a Linux Process (PID, PPID, fork, exec, and wait)*
-2. **Part 2**: *Virtualizing the Process Tree with Linux PID Namespaces*
-3. **Part 3**: *Filesystem Jailing: Read-Only RootFS, Mount Namespaces & pivot_root*
-4. **Part 4**: *Zero-Trust Networking: Isolating Sandboxes with Network Namespaces*
-5. **Part 5**: *Hard Resource Control: Mastering Cgroups v2 (Memory, CPU & Anti-Fork-Bombs)*
-6. **Part 6**: *Syscall Defense: Crafting Seccomp BPF Filters from Scratch*
-7. **Part 7**: *Building a Resilient Process Lifecycle & Execution Engine in Go*
-8. **Part 8**: *Continuous Delivery on Private Infrastructure: Automated Packaging, Manual Approval & Rollbacks*
