@@ -115,11 +115,13 @@ HEALTHY=false
 
 while [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
     ATTEMPT=$((ATTEMPT + 1))
-    if curl -s "http://127.0.0.1:${PORT}/health" | grep -q '"status": "ok"'; then
+    HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/health" 2>/dev/null || echo "000")"
+    if [ "${HTTP_CODE}" = "200" ]; then
         HEALTHY=true
+        echo "    [Attempt ${ATTEMPT}/${MAX_ATTEMPTS}] Received HTTP ${HTTP_CODE} OK — Service is healthy."
         break
     fi
-    echo "    [Attempt ${ATTEMPT}/${MAX_ATTEMPTS}] Waiting for service to respond..."
+    echo "    [Attempt ${ATTEMPT}/${MAX_ATTEMPTS}] Received HTTP ${HTTP_CODE} — Waiting for service to respond..."
     sleep 1
 done
 
@@ -137,7 +139,8 @@ if [ "${HEALTHY}" = "true" ]; then
     ls -dt "${RELEASES_DIR}"/*/ 2>/dev/null | tail -n +6 | xargs -r rm -rf
 
     # Final service version check
-    curl -s "http://127.0.0.1:${PORT}/health" || true
+    echo "==> Service Response:"
+    curl -sS "http://127.0.0.1:${PORT}/health" || true
     echo ""
     exit 0
 else
@@ -152,10 +155,11 @@ else
         ln -sfn "${CURRENT_LINK}/bin/aegisbox" "${BIN_LINK}"
         systemctl restart aegisbox.service
         sleep 2
-        if curl -s "http://127.0.0.1:${PORT}/health" | grep -q '"status": "ok"'; then
-            echo "==> [ROLLBACK OK] Service restored to previous release."
+        ROLLBACK_HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/health" 2>/dev/null || echo "000")"
+        if [ "${ROLLBACK_HTTP_CODE}" = "200" ]; then
+            echo "==> [ROLLBACK OK] Service restored to previous release (HTTP ${ROLLBACK_HTTP_CODE})."
         else
-            echo "==> [CRITICAL] Previous release also failed health check."
+            echo "==> [CRITICAL] Previous release also failed health check (HTTP ${ROLLBACK_HTTP_CODE})."
         fi
     else
         echo "==> No prior release available to roll back to."
